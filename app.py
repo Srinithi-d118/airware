@@ -157,7 +157,15 @@ def gauge(score, color):
 
 @st.cache_data(ttl=600)
 def fetch(city):
-    url = f"https://api.waqi.info/feed/{city}/?token={TOKEN}"
+    query = city.strip()
+    url = f"https://api.waqi.info/feed/{query}/?token={TOKEN}"
+
+    # If the user typed a state or union territory, use its main city location
+    for state, (lat, lon) in CITY_COORDS.items():
+        if state.lower() == query.lower():
+            url = f"https://api.waqi.info/feed/geo:{lat};{lon}/?token={TOKEN}"
+            break
+
     try:
         data = requests.get(url, timeout=10).json()
         if data.get("status") != "ok":
@@ -200,12 +208,10 @@ def load_map_data():
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(_geo_fetch, CITY_COORDS.items()))
     return [r for r in results if r]
-
-
 # ---------- Sidebar ----------
 st.sidebar.title("🌫️ AirAware")
 st.sidebar.caption("Air Quality Alert System")
-city = st.sidebar.text_input("Your city", "Bangalore")
+city = st.sidebar.text_input("Your city or state", "Bangalore")
 profile = st.sidebar.selectbox("Who are you?", PROFILES)
 limit = st.sidebar.slider("Alert me when AQI goes above", 50, 300, 100, 10)
 
