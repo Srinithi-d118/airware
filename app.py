@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from secret import TOKEN
 from health_advice import PROFILES, get_advice
+from alerts import send_alert_email
 
 st.set_page_config(page_title="AirAware", page_icon="🌫️", layout="wide")
 
@@ -214,6 +215,8 @@ st.sidebar.caption("Air Quality Alert System")
 city = st.sidebar.text_input("Your city or state", "Bangalore")
 profile = st.sidebar.selectbox("Who are you?", PROFILES)
 limit = st.sidebar.slider("Alert me when AQI goes above", 50, 300, 100, 10)
+email_to = st.sidebar.text_input("Send alerts to (email)", "")
+auto_email = st.sidebar.checkbox("Email me automatically when above limit")
 
 st.title("🌫️ AirAware")
 st.caption("Live air quality with health advice made for you")
@@ -245,6 +248,29 @@ with tab1:
             st.error(f"🚨 ALERT: AQI {aqi} is above your limit of {limit}.")
         else:
             st.success(f"✅ AQI {aqi} is within your limit of {limit}.")
+
+        # ---- Email alert ----
+        if email_to:
+            if aqi > limit and auto_email:
+                alert_key = f"{city}|{aqi}|{limit}|{email_to}"
+                if st.session_state.get("last_alert") != alert_key:
+                    ok, msg = send_alert_email(
+                        email_to, result["station"], aqi, level, advice, profile, limit
+                    )
+                    st.session_state["last_alert"] = alert_key
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+            if st.button("📧 Send alert email now"):
+                ok, msg = send_alert_email(
+                    email_to, result["station"], aqi, level, advice, profile, limit
+                )
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
         col1, col2 = st.columns([1, 1])
         score = risk_score(aqi, profile)
@@ -330,6 +356,7 @@ with tab3:
     )
     st.write(
         "Limitation: readings come from monitoring stations, which are mostly in cities. "
-        "Each state on the map shows the nearest available station."
+        "Each state on the map shows the nearest available station. Email alerts are sent "
+        "while the website is open; background alerts would need a server."
     )
     st.caption("General guidance only, not medical advice.")
