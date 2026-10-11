@@ -60,6 +60,15 @@ PM25_BREAKPOINTS = [
     (301, 500, 250.5, 500.4),
 ]
 
+LEGEND = [
+    ("#2e9e4f", "Good 0-50"),
+    ("#d4a017", "Moderate 51-100"),
+    ("#e8751a", "Sensitive 101-150"),
+    ("#d62f2f", "Unhealthy 151-200"),
+    ("#8e3a9e", "Very unhealthy 201-300"),
+    ("#7e0023", "Hazardous 300+"),
+]
+
 # One main city (usually the capital) for each state and union territory
 CITY_COORDS = {
     "Andhra Pradesh": (16.51, 80.52),
@@ -214,7 +223,8 @@ def _geo_fetch(item):
                 "AQI": aqi,
                 "lat": lat,
                 "lon": lon,
-                "color": hex_to_rgb(aqi_color(aqi)) + [210],
+                "color": hex_to_rgb(aqi_color(aqi)) + [225],
+                "halo": hex_to_rgb(aqi_color(aqi)) + [70],
             }
     except Exception:
         return None
@@ -233,8 +243,17 @@ st.sidebar.caption("Air Quality Alert System")
 city = st.sidebar.text_input("Your city or state", "Bangalore")
 profile = st.sidebar.selectbox("Who are you?", PROFILES)
 limit = st.sidebar.slider("Alert me when AQI goes above", 50, 300, 100, 10)
+
+st.sidebar.markdown("**Alerts**")
 email_to = st.sidebar.text_input("Send alerts to (email)", "")
-auto_email = st.sidebar.checkbox("Email me automatically when above limit")
+telegram_id = st.sidebar.text_input(
+    "Your Telegram chat ID (optional)",
+    "",
+    help="1) Open our AirAware bot in Telegram and press Start. "
+         "2) Message @userinfobot to get your chat ID (a number). "
+         "3) Type that number here.",
+)
+auto_email = st.sidebar.checkbox("Alert me automatically when above limit")
 
 st.title("🌫️ AirAware")
 st.caption("Live air quality with health advice made for you")
@@ -278,13 +297,14 @@ with tab1:
         else:
             st.success(f"✅ AQI {aqi} is within your limit of {limit}.")
 
-        # ---- Email alert ----
-        if email_to:
+        # ---- Alerts (email and/or Telegram) ----
+        if email_to or telegram_id:
             if aqi > limit and auto_email:
-                alert_key = f"{city}|{aqi}|{limit}|{email_to}"
+                alert_key = f"{city}|{aqi}|{limit}|{email_to}|{telegram_id}"
                 if st.session_state.get("last_alert") != alert_key:
                     ok, msg = send_alert_email(
-                        email_to, result["station"], aqi, level, advice, profile, limit
+                        email_to, result["station"], aqi, level, advice,
+                        profile, limit, telegram_id,
                     )
                     st.session_state["last_alert"] = alert_key
                     if ok:
@@ -292,9 +312,10 @@ with tab1:
                     else:
                         st.error(msg)
 
-            if st.button("📧 Send alert email now"):
+            if st.button("📣 Send alert now"):
                 ok, msg = send_alert_email(
-                    email_to, result["station"], aqi, level, advice, profile, limit
+                    email_to, result["station"], aqi, level, advice,
+                    profile, limit, telegram_id,
                 )
                 if ok:
                     st.success(msg)
@@ -361,10 +382,10 @@ with tab_trends:
 
 # ---------- Tab 2: 3D map ----------
 with tab2:
-    st.subheader("3D air quality map of India")
+    st.subheader("🗺️ Live air quality map of India")
     st.caption(
         "One reading for each state and union territory (nearest monitoring station). "
-        "Taller and redder columns mean worse air. Drag to rotate. Hold Ctrl and drag to tilt."
+        "Drag to rotate, scroll to zoom, hold Ctrl and drag to tilt."
     )
 
     if st.button("Load live map"):
@@ -374,34 +395,186 @@ with tab2:
     rows = st.session_state.get("map_rows")
     if rows:
         df = pd.DataFrame(rows)
-        layer = pdk.Layer(
-            "ColumnLayer",
-            data=df,
-            get_position=["lon", "lat"],
-            get_elevation="AQI",
-            elevation_scale=1500,
-            radius=35000,
-            get_fill_color="color",
-            pickable=True,
-            auto_highlight=True,
-            extruded=True,
+        ELEV = 2000
+        df["top"] = df["AQI"] * ELEV
+        df["label"] = df["AQI"].astype(str)
+        df["bubble"] = 40000 + df["AQI"] * 350
+
+        # ---- Controls ----
+        ca, cb, cc = st.columns([2, 1, 1])
+        mode = ca.radio(
+            "Map style", ["3D columns", "Glow bubbles", "Heat map"], horizontal=True
         )
-        view = pdk.ViewState(latitude=22.0, longitude=79.0, zoom=3.7, pitch=55, bearing=10)
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=[layer],
-                initial_view_state=view,
-                map_provider="carto",
-                map_style="dark",
-                tooltip={"text": "{City}\nAQI: {AQI}\nStation: {Station}"},
+        focus = cb.selectbox("Zoom to", ["All India"] + sorted(CITY_COORDS))
+        theme = cc.selectbox("Background", ["dark", "light"])
+        text_color = [255, 255, 255, 240] if theme == "dark" else [20, 20, 20, 240]
+
+        # ---- Legend ----
+        chips = "".join(
+            f'<span style="background:{c};padding:4px 12px;border-radius:14px;'
+            f'margin:0 6px 6px 0;color:white;font-size:13px;display:inline-block;">{t}</span>'
+            for c, t in LEGEND
+        )
+        st.markdown(chips, unsafe_allow_html=True)
+
+        # ---- Layers ----
+        layers = []
+        if mode == "3D columns":
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=df,
+                    get_position=["lon", "lat"],
+                    get_radius=90000,
+                    get_fill_color="halo",
+                    pickable=False,
+                )
+            )
+            layers.append(
+                pdk.Layer(
+                    "ColumnLayer",
+                    data=df,
+                    get_position=["lon", "lat"],
+                    get_elevation="AQI",
+                    elevation_scale=ELEV,
+                    radius=40000,
+                    get_fill_color="color",
+                    pickable=True,
+                    auto_highlight=True,
+                    extruded=True,
+                )
+            )
+            label_position = ["lon", "lat", "top"]
+        elif mode == "Glow bubbles":
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=df,
+                    get_position=["lon", "lat"],
+                    get_radius="bubble",
+                    get_fill_color="halo",
+                    pickable=False,
+                )
+            )
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=df,
+                    get_position=["lon", "lat"],
+                    get_radius=24000,
+                    get_fill_color="color",
+                    pickable=True,
+                    auto_highlight=True,
+                )
+            )
+            label_position = ["lon", "lat"]
+        else:
+            layers.append(
+                pdk.Layer(
+                    "HeatmapLayer",
+                    data=df,
+                    get_position=["lon", "lat"],
+                    get_weight="AQI",
+                    radius_pixels=80,
+                    intensity=1.2,
+                    threshold=0.05,
+                    color_range=[
+                        [46, 158, 79],
+                        [212, 160, 23],
+                        [232, 117, 26],
+                        [214, 47, 47],
+                        [142, 58, 158],
+                        [126, 0, 35],
+                    ],
+                )
+            )
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=df,
+                    get_position=["lon", "lat"],
+                    get_radius=14000,
+                    get_fill_color="color",
+                    pickable=True,
+                )
+            )
+            label_position = ["lon", "lat"]
+
+        layers.append(
+            pdk.Layer(
+                "TextLayer",
+                data=df,
+                get_position=label_position,
+                get_text="label",
+                get_size=16,
+                get_color=text_color,
+                get_pixel_offset=[0, -8],
+                pickable=False,
             )
         )
+
+        # ---- View ----
+        if focus == "All India":
+            lat0, lon0, zoom = 22.0, 79.0, 3.7
+        else:
+            lat0, lon0 = CITY_COORDS[focus]
+            zoom = 6.2
+        pitch = 55 if mode == "3D columns" else 0
+        view = pdk.ViewState(
+            latitude=lat0, longitude=lon0, zoom=zoom, pitch=pitch, bearing=10
+        )
+
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=layers,
+                initial_view_state=view,
+                map_provider="carto",
+                map_style=theme,
+                tooltip={
+                    "html": "<b>{City}</b><br/>AQI: {AQI}<br/>Station: {Station}",
+                    "style": {"backgroundColor": "#102a33", "color": "white"},
+                },
+            ),
+            height=620,
+        )
+
+        # ---- Summary cards ----
         worst = df.sort_values("AQI", ascending=False).iloc[0]
         best = df.sort_values("AQI").iloc[0]
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Most polluted right now", worst["City"], f"AQI {worst['AQI']}")
         c2.metric("Cleanest right now", best["City"], f"AQI {best['AQI']}")
-        c3.metric("States/UTs with data", f"{len(df)} of {len(CITY_COORDS)}")
+        c3.metric("India average (these places)", round(df["AQI"].mean()))
+        c4.metric("States/UTs with data", f"{len(df)} of {len(CITY_COORDS)}")
+
+        # ---- Rankings ----
+        top_max = int(max(300, df["AQI"].max()))
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**🔴 Top 5 most polluted**")
+            worst5 = df.sort_values("AQI", ascending=False).head(5)[["City", "Station", "AQI"]]
+            st.dataframe(
+                worst5,
+                hide_index=True,
+                column_config={
+                    "AQI": st.column_config.ProgressColumn(
+                        "AQI", min_value=0, max_value=top_max, format="%d"
+                    )
+                },
+            )
+        with right:
+            st.markdown("**🟢 Top 5 cleanest**")
+            best5 = df.sort_values("AQI").head(5)[["City", "Station", "AQI"]]
+            st.dataframe(
+                best5,
+                hide_index=True,
+                column_config={
+                    "AQI": st.column_config.ProgressColumn(
+                        "AQI", min_value=0, max_value=top_max, format="%d"
+                    )
+                },
+            )
+
         st.bar_chart(df.set_index("City")["AQI"])
     elif rows is not None:
         st.warning("No data came back. Check your internet connection and click Load live map again.")
@@ -421,8 +594,13 @@ with tab3:
         "22 µg/m³ of PM2.5 is about one cigarette a day."
     )
     st.write(
+        "Alerts: email works for any address. Telegram alerts go to the chat ID the user "
+        "types in, after they press Start on our bot. If email is blocked on a network, "
+        "the alert falls back to Telegram."
+    )
+    st.write(
         "Limitations: readings come from monitoring stations, which are mostly in cities. "
-        "Each state on the map shows the nearest available station. Email alerts are sent "
+        "Each state on the map shows the nearest available station. Alerts are sent "
         "while the website is open, and history is saved only when a city is checked."
     )
     st.caption("General guidance only, not medical advice.")
