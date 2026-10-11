@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 import requests
 import pandas as pd
@@ -8,6 +9,7 @@ import streamlit as st
 from secret import TOKEN
 from health_advice import PROFILES, get_advice
 from alerts import send_alert_email
+from history import save_reading, load_history
 
 st.set_page_config(page_title="AirAware", page_icon="🌫️", layout="wide")
 
@@ -157,29 +159,44 @@ def gauge(score, color):
 
 
 @st.cache_data(ttl=600)
-def fetch(city):
-    query = city.strip()
-    url = f"https://api.waqi.info/feed/{query}/?token={TOKEN}"
+def _get_data(url):
+    """Download data from the API. If it fails, raise an error.
+    Streamlit does not remember errors, so a failed lookup is never saved."""
+    reply = requests.get(url, timeout=10).json()
+    if reply.get("status") != "ok":
+        raise ValueError(str(reply.get("data")))
+    return reply["data"]
 
-    # If the user typed a state or union territory, use its main city location
+
+def fetch(city):
+    """Returns (result, error_message). One of them is None."""
+    query = city.strip()
+    if not query:
+        return None, "Please type a city or state."
+
+    name_url = f"https://api.waqi.info/feed/{quote(query)}/?token={TOKEN}"
+    urls = [name_url]
+
+    # If the user typed a state or union territory, try its main city location first
     for state, (lat, lon) in CITY_COORDS.items():
         if state.lower() == query.lower():
-            url = f"https://api.waqi.info/feed/geo:{lat};{lon}/?token={TOKEN}"
+            geo_url = f"https://api.waqi.info/feed/geo:{lat};{lon}/?token={TOKEN}"
+            urls = [geo_url, name_url]
             break
 
-    try:
-        data = requests.get(url, timeout=10).json()
-        if data.get("status") != "ok":
-            return None
-        d = data["data"]
-        return {
-            "aqi": int(d["aqi"]),
-            "station": d["city"]["name"],
-            "iaqi": d.get("iaqi", {}),
-            "forecast": d.get("forecast", {}).get("daily", {}).get("pm25", []),
-        }
-    except Exception:
-        return None
+    last_error = "unknown error"
+    for url in urls:
+        try:
+            d = _get_data(url)
+            return {
+                "aqi": int(d["aqi"]),
+                "station": d["city"]["name"],
+                "iaqi": d.get("iaqi", {}),
+                "forecast": d.get("forecast", {}).get("daily", {}).get("pm25", []),
+            }, None
+        except Exception as e:
+            last_error = str(e)
+    return None, last_error
 
 
 def _geo_fetch(item):
@@ -204,11 +221,12 @@ def _geo_fetch(item):
     return None
 
 
-@st.cache_data(ttl=600)
 def load_map_data():
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(_geo_fetch, CITY_COORDS.items()))
     return [r for r in results if r]
+
+
 # ---------- Sidebar ----------
 st.sidebar.title("🌫️ AirAware")
 st.sidebar.caption("Air Quality Alert System")
@@ -220,17 +238,28 @@ auto_email = st.sidebar.checkbox("Email me automatically when above limit")
 
 st.title("🌫️ AirAware")
 st.caption("Live air quality with health advice made for you")
-tab1, tab2, tab3 = st.tabs(["Today", "3D India map", "About"])
+tab1, tab_trends, tab2, tab3 = st.tabs(["Today", "Trends", "3D India map", "About"])
 
 # ---------- Tab 1: Today ----------
 with tab1:
-    result = fetch(city)
+    result, error = fetch(city)
     if result is None:
-        st.error("City not found or no data. Try another name.")
+        st.error(f"No data for '{city}'. Reason: {error}")
+        st.caption("Try another name, for example Chennai, Delhi or Mumbai. "
+                   "If every city fails, check your internet or your token in secret.py.")
     else:
         aqi = result["aqi"]
         level, advice = get_advice(aqi, profile)
         color = aqi_color(aqi)
+
+        pm25_index = result["iaqi"].get("pm25", {}).get("v", aqi)
+        pm10 = result["iaqi"].get("pm10", {}).get("v", "n/a")
+
+        # Save this reading so the Trends tab can show history
+        try:
+            save_reading(city.strip().title(), result["station"], aqi, pm25_index)
+        except Exception:
+            pass
 
         st.markdown(
             f"""
@@ -276,10 +305,8 @@ with tab1:
         score = risk_score(aqi, profile)
         col1.plotly_chart(gauge(score, color))
 
-        pm25_index = result["iaqi"].get("pm25", {}).get("v", aqi)
         pm25_conc = aqi_to_pm25(float(pm25_index))
         cigs = pm25_conc / 22
-        pm10 = result["iaqi"].get("pm10", {}).get("v", "n/a")
 
         col2.metric("🚬 Cigarettes per day equivalent", f"{cigs:.1f}")
         col2.caption("Breathing this air all day is roughly like smoking this many cigarettes (approximate).")
@@ -294,6 +321,43 @@ with tab1:
             fdf = pd.DataFrame(result["forecast"])
             fdf = fdf.set_index("day")[["avg", "min", "max"]]
             st.line_chart(fdf)
+
+# ---------- Tab: Trends ----------
+with tab_trends:
+    st.subheader("AQI trends")
+    st.caption("Every time a city is checked on the Today tab, the reading is saved here.")
+    hist = load_history()
+    if hist.empty:
+        st.info("No history yet. Check a city on the Today tab, then come back here.")
+    else:
+        cities = sorted(hist["city"].unique())
+        pick = st.selectbox("Choose a city", cities)
+        h = hist[hist["city"] == pick].sort_values("time")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Readings saved", len(h))
+        m2.metric("Average AQI", round(h["aqi"].mean()))
+        m3.metric("Highest AQI", int(h["aqi"].max()))
+        m4.metric("Lowest AQI", int(h["aqi"].min()))
+
+        if len(h) >= 2:
+            change = int(h["aqi"].iloc[-1]) - int(h["aqi"].iloc[-2])
+            if change > 0:
+                st.warning(f"📈 Air is getting worse: AQI went up by {change} since the last reading.")
+            elif change < 0:
+                st.success(f"📉 Air is getting better: AQI went down by {abs(change)} since the last reading.")
+            else:
+                st.info("➡️ AQI is the same as the last reading.")
+
+        st.line_chart(h.set_index("time")["aqi"])
+        st.dataframe(h.tail(20), hide_index=True)
+
+        st.download_button(
+            "Download history as CSV",
+            hist.to_csv(index=False),
+            file_name="airaware_history.csv",
+            mime="text/csv",
+        )
 
 # ---------- Tab 2: 3D map ----------
 with tab2:
@@ -339,6 +403,8 @@ with tab2:
         c2.metric("Cleanest right now", best["City"], f"AQI {best['AQI']}")
         c3.metric("States/UTs with data", f"{len(df)} of {len(CITY_COORDS)}")
         st.bar_chart(df.set_index("City")["AQI"])
+    elif rows is not None:
+        st.warning("No data came back. Check your internet connection and click Load live map again.")
     else:
         st.info("Click **Load live map** to see all states and union territories.")
 
@@ -355,8 +421,8 @@ with tab3:
         "22 µg/m³ of PM2.5 is about one cigarette a day."
     )
     st.write(
-        "Limitation: readings come from monitoring stations, which are mostly in cities. "
+        "Limitations: readings come from monitoring stations, which are mostly in cities. "
         "Each state on the map shows the nearest available station. Email alerts are sent "
-        "while the website is open; background alerts would need a server."
+        "while the website is open, and history is saved only when a city is checked."
     )
     st.caption("General guidance only, not medical advice.")
