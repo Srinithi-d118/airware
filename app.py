@@ -1,3 +1,6 @@
+import base64
+import os
+import random
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
@@ -39,6 +42,32 @@ st.markdown(
         50%  { box-shadow: 0 0 34px rgba(255,255,255,0.45); }
         100% { box-shadow: 0 0 8px rgba(255,255,255,0.15); }
     }
+
+    /* ---- Dropdown lists: dark background, light text ---- */
+    div[data-baseweb="popover"],
+    div[data-baseweb="popover"] > div,
+    div[data-baseweb="popover"] ul,
+    ul[role="listbox"],
+    div[data-baseweb="menu"] {
+        background-color: #12303b !important;
+    }
+    div[data-baseweb="popover"] li,
+    ul[role="listbox"] li,
+    div[data-baseweb="menu"] li {
+        background-color: #12303b !important;
+        color: #eef3f7 !important;
+    }
+    div[data-baseweb="popover"] li *,
+    ul[role="listbox"] li *,
+    div[data-baseweb="menu"] li * {
+        color: #eef3f7 !important;
+    }
+    div[data-baseweb="popover"] li:hover,
+    ul[role="listbox"] li:hover,
+    ul[role="listbox"] li[aria-selected="true"],
+    div[data-baseweb="menu"] li:hover {
+        background-color: #2c5364 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -49,6 +78,13 @@ RISK_MULTIPLIER = {
     "Child": 1.3,
     "Elderly person": 1.3,
     "Asthma / lung patient": 1.6,
+}
+
+AVATAR = {
+    "Healthy adult": "🧑",
+    "Child": "🧒",
+    "Elderly person": "👵",
+    "Asthma / lung patient": "🩺",
 }
 
 PM25_BREAKPOINTS = [
@@ -167,6 +203,113 @@ def gauge(score, color):
     return fig
 
 
+def scene_html(aqi):
+    """A city skyline drawn in code. The sky gets hazier as the AQI rises."""
+    if aqi <= 50:
+        top, bottom, haze = "#5bb8f5", "#dff3ff", 0.0
+    elif aqi <= 100:
+        top, bottom, haze = "#7fb2d6", "#e8f0f3", 0.12
+    elif aqi <= 150:
+        top, bottom, haze = "#b3a583", "#ecdcb9", 0.28
+    elif aqi <= 200:
+        top, bottom, haze = "#9a8672", "#d3bda3", 0.42
+    elif aqi <= 300:
+        top, bottom, haze = "#76635e", "#aa9288", 0.58
+    else:
+        top, bottom, haze = "#463838", "#6b5853", 0.72
+
+    sun_opacity = max(0.15, 1 - haze * 1.1)
+    buildings = [
+        (0, 60, 90), (70, 50, 130), (130, 70, 100), (210, 40, 150),
+        (260, 80, 110), (350, 50, 140), (410, 70, 95), (490, 55, 125),
+        (555, 75, 105), (640, 45, 145), (695, 60, 100), (765, 35, 120),
+    ]
+
+    parts = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 220">']
+    parts.append(
+        '<defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0" stop-color="{top}"/>'
+        f'<stop offset="1" stop-color="{bottom}"/>'
+        '</linearGradient></defs>'
+    )
+    parts.append('<rect width="800" height="220" fill="url(#sky)"/>')
+    parts.append(
+        f'<circle cx="650" cy="62" r="30" fill="#ffd54f" opacity="{sun_opacity:.2f}"/>'
+    )
+    for x, w, h in buildings:
+        parts.append(
+            f'<rect x="{x}" y="{220 - h}" width="{w}" height="{h}" '
+            'fill="#1c2b36" opacity="0.92"/>'
+        )
+    parts.append(
+        f'<rect width="800" height="220" fill="#8a7a6a" opacity="{haze * 0.55:.2f}"/>'
+    )
+    rnd = random.Random(7)
+    for _ in range(min(aqi // 3, 90)):
+        x = rnd.uniform(0, 800)
+        y = rnd.uniform(15, 200)
+        r = rnd.uniform(1, 3)
+        parts.append(f'<circle cx="{x:.0f}" cy="{y:.0f}" r="{r:.1f}" fill="#5b4636" opacity="0.5"/>')
+    parts.append('</svg>')
+
+    svg = "".join(parts)
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+    return (
+        f'<img src="data:image/svg+xml;base64,{b64}" '
+        'style="width:100%;border-radius:18px;display:block;"/>'
+    )
+
+
+def action_items(aqi, profile):
+    """Four simple action cards. Sensitive people get stricter advice."""
+    t = aqi + (30 if profile != "Healthy adult" else 0)
+    ok, warn, bad = "#2e9e4f", "#e8751a", "#d62f2f"
+
+    if t <= 100:
+        exercise = ("🏃", "Outdoor exercise", "Go ahead", ok)
+    elif t <= 150:
+        exercise = ("🏃", "Outdoor exercise", "Keep it light and short", warn)
+    else:
+        exercise = ("🏃", "Outdoor exercise", "Do it indoors today", bad)
+
+    if t <= 100:
+        mask = ("😷", "Mask", "Not needed", ok)
+    elif t <= 150:
+        mask = ("😷", "Mask", "Wear one if you are sensitive", warn)
+    else:
+        mask = ("😷", "Mask", "Wear an N95 mask outside", bad)
+
+    if t <= 100:
+        windows = ("🪟", "Windows", "Open for fresh air", ok)
+    elif t <= 150:
+        windows = ("🪟", "Windows", "Open only briefly", warn)
+    else:
+        windows = ("🪟", "Windows", "Keep them closed", bad)
+
+    if t <= 100:
+        purifier = ("🌀", "Air purifier", "Optional", ok)
+    elif t <= 150:
+        purifier = ("🌀", "Air purifier", "Helpful indoors", warn)
+    else:
+        purifier = ("🌀", "Air purifier", "Run one if you can", bad)
+
+    return [exercise, mask, windows, purifier]
+
+
+def action_cards_html(items):
+    cards = ""
+    for icon, title, text, color in items:
+        cards += (
+            f'<div style="flex:1;min-width:150px;background:rgba(255,255,255,0.07);'
+            f'border:1px solid {color};border-left:6px solid {color};'
+            f'border-radius:14px;padding:12px;">'
+            f'<div style="font-size:30px;">{icon}</div>'
+            f'<div style="font-weight:700;">{title}</div>'
+            f'<div style="font-size:14px;">{text}</div></div>'
+        )
+    return f'<div style="display:flex;gap:12px;flex-wrap:wrap;">{cards}</div>'
+
+
 @st.cache_data(ttl=600)
 def _get_data(url):
     """Download data from the API. If it fails, raise an error.
@@ -238,6 +381,8 @@ def load_map_data():
 
 
 # ---------- Sidebar ----------
+if os.path.exists("images/logo.png"):
+    st.sidebar.image("images/logo.png")
 st.sidebar.title("🌫️ AirAware")
 st.sidebar.caption("Air Quality Alert System")
 city = st.sidebar.text_input("Your city or state", "Bangalore")
@@ -255,6 +400,9 @@ telegram_id = st.sidebar.text_input(
 )
 auto_email = st.sidebar.checkbox("Alert me automatically when above limit")
 
+# ---------- Header ----------
+if os.path.exists("images/banner.jpg"):
+    st.image("images/banner.jpg", use_container_width=True)
 st.title("🌫️ AirAware")
 st.caption("Live air quality with health advice made for you")
 tab1, tab_trends, tab2, tab3 = st.tabs(["Today", "Trends", "3D India map", "About"])
@@ -296,6 +444,15 @@ with tab1:
             st.error(f"🚨 ALERT: AQI {aqi} is above your limit of {limit}.")
         else:
             st.success(f"✅ AQI {aqi} is within your limit of {limit}.")
+
+        # ---- Sky picture ----
+        st.markdown(scene_html(aqi), unsafe_allow_html=True)
+        st.caption("Illustration: the sky gets hazier and fills with particles as the AQI rises.")
+
+        # ---- Action cards ----
+        st.subheader(f"{AVATAR[profile]} What to do today: {profile}")
+        st.markdown(action_cards_html(action_items(aqi, profile)), unsafe_allow_html=True)
+        st.write("")
 
         # ---- Alerts (email and/or Telegram) ----
         if email_to or telegram_id:
@@ -591,7 +748,8 @@ with tab3:
     st.write(
         "The risk score is our own simple model: AQI scaled to 0-100 and increased "
         "for sensitive groups. The cigarette equivalent uses the rule of thumb that "
-        "22 µg/m³ of PM2.5 is about one cigarette a day."
+        "22 µg/m³ of PM2.5 is about one cigarette a day. The sky picture is drawn "
+        "in code and only illustrates how hazy the air is."
     )
     st.write(
         "Alerts: email works for any address. Telegram alerts go to the chat ID the user "
